@@ -16,7 +16,7 @@ def dms_to_decimal(degrees, minutes, seconds, direction):
 
 
 def extract_gps_from_exif(filepath):
-    """Extract GPS coordinates from EXIF metadata using exiftool, with correct sign handling."""
+    """Extract GPS coordinates from EXIF metadata using exiftool, ensuring correct sign handling."""
     try:
         result = subprocess.run(['exiftool', '-GPS*', filepath],
                                 capture_output=True, text=True)
@@ -49,15 +49,21 @@ def extract_gps_from_exif(filepath):
         if not lat_parts or not lon_parts:
             return None
 
-        # Convert to decimal format, with correct sign for latitude and longitude
+        # Convert to decimal format with correct sign
         decimal_lat = dms_to_decimal(*lat_parts, lat_ref)
         decimal_lon = dms_to_decimal(*lon_parts, lon_ref)
+
+        # Debug: Print extracted values for verification
+        print(f"File: {filepath}")
+        print(f"Extracted Latitude: {decimal_lat}, Reference: {lat_ref}")
+        print(f"Extracted Longitude: {decimal_lon}, Reference: {lon_ref}")
 
         return (decimal_lat, decimal_lon)
 
     except Exception as e:
         print(f"Error processing {filepath}: {str(e)}")
         return None
+
 
 
 def parallel_gps_extraction(images_dir):
@@ -71,97 +77,92 @@ def parallel_gps_extraction(images_dir):
 
 
 def calculate_distances_on_gpu(ground_truth, image_data):
-    """Calculate distances between points using GPU acceleration, with absolute longitude values for a temporary fix."""
+    """Calculate distances between points using GPU acceleration, with image longitude forced negative."""
     try:
-        # Extract and confirm coordinates, using absolute values for longitudes
+        # Extract and confirm coordinates
         gt_lats = np.array([row['Latitude'] for row in ground_truth if not pd.isna(row['Latitude'])])
-        gt_lons = np.abs(np.array([row['Longitude'] for row in ground_truth if not pd.isna(row['Longitude'])]))
+        gt_lons = np.array([row['Longitude'] for row in ground_truth if not pd.isna(row['Longitude'])])
         img_lats, img_lons = zip(*[gps for _, gps in image_data])
         img_lats = np.array(img_lats)
-        img_lons = np.abs(np.array(img_lons))  # Use absolute values for image longitudes
-
+        img_lons = -np.abs(np.array(img_lons))  # Force image longitudes to be negative
+        
         # Debug: Print coordinate samples
         print("\nGround Truth Coordinates (sample):")
         for lat, lon in zip(gt_lats[:3], gt_lons[:3]):
-            print(f"Lat: {lat:.6f}, Lon (abs): {lon:.6f}")
-
+            print(f"Lat: {lat:.6f}, Lon: {lon:.6f}")
+        
         print("\nImage Coordinates (sample):")
         for lat, lon in zip(img_lats[:3], img_lons[:3]):
-            print(f"Lat: {lat:.6f}, Lon (abs): {lon:.6f}")
-
+            print(f"Lat: {lat:.6f}, Lon (forced negative): {lon:.6f}")
+        
         # Convert to radians
         gt_lat_arr = cp.radians(cp.array(gt_lats)).reshape(-1, 1)
         gt_lon_arr = cp.radians(cp.array(gt_lons)).reshape(-1, 1)
         img_lat_arr = cp.radians(cp.array(img_lats)).reshape(1, -1)
         img_lon_arr = cp.radians(cp.array(img_lons)).reshape(1, -1)
-
+        
         # Debug: Print radian samples
         print("\nConverted Ground Truth Coordinates (Radians):")
-        print(f"Lat: {gt_lat_arr[:3].flatten()}, Lon (abs): {gt_lon_arr[:3].flatten()}")
-
+        print(f"Lat: {gt_lat_arr[:3].flatten()}, Lon: {gt_lon_arr[:3].flatten()}")
+        
         print("\nConverted Image Coordinates (Radians):")
-        print(f"Lat: {img_lat_arr[0, :3]}, Lon (abs): {img_lon_arr[0, :3]}")
-
+        print(f"Lat: {img_lat_arr[0, :3]}, Lon (forced negative): {img_lon_arr[0, :3]}")
+        
         # Haversine distance calculation
         dlat = img_lat_arr - gt_lat_arr
         dlon = img_lon_arr - gt_lon_arr
-
+        
         a = cp.sin(dlat / 2) ** 2 + cp.cos(gt_lat_arr) * cp.cos(img_lat_arr) * cp.sin(dlon / 2) ** 2
         a = cp.clip(a, 0, 1)  # Clip to avoid any rounding errors outside valid range
         c = 2 * cp.arcsin(cp.sqrt(a))
-
+        
         # Radius of Earth in meters
         R = 6371000  # Earth radius in meters
         distances = R * c
-
+        
         # Debug: Check a few calculated distances
         print("\nSample Distances (first 3x3 matrix):")
         print(cp.asnumpy(distances[:3, :3]))
-
+        
         return cp.asnumpy(distances)
-
+    
     except Exception as e:
         print(f"Error in GPU distance calculation: {str(e)}")
         raise
 
-def match_ground_truth(ground_truth, image_data, distance_threshold):
+
+def match_ground_truth(ground_truth, image_data, distance_threshold=10.0):
     """
     Match ground truth data to closest images within a given distance threshold.
-    - distance_threshold: maximum distance in meters for a ground truth point to be considered 'matched' with an image.
+    Ensure the corrected image longitudes are properly handled in the output CSV.
     """
     print("Calculating distances...")
     distances = calculate_distances_on_gpu(ground_truth, image_data)
     matches = []
     print("Finding closest matches within threshold...")
-
+    
     for i in range(distances.shape[0]):
-        # Get all matches within the threshold distance
         for j in range(distances.shape[1]):
             distance = distances[i, j]
             if distance <= distance_threshold:
                 img_lat, img_lon = image_data[j][1]  # Image's latitude and longitude
-                closest_img = image_data[j][0]  # Image file path
-
-                # Round image coordinates to 7 decimal places for consistency
-                img_lat = round(img_lat, 7)
-                img_lon = round(img_lon, 7)
-
+                img_lon = -abs(img_lon)  # Force image longitude to be negative
+                
                 # Append match information
                 matches.append({
                     "GroundTruth_Lat": round(ground_truth[i]['Latitude'], 7),
                     "GroundTruth_Lon": round(ground_truth[i]['Longitude'], 7),
-                    "Image_Lat": img_lat,
-                    "Image_Lon": img_lon,
+                    "Image_Lat": round(img_lat, 7),
+                    "Image_Lon": round(img_lon, 7),  # Save corrected negative longitude
                     "Distance": distance,
-                    "ImageFile": closest_img
+                    "ImageFile": image_data[j][0]
                 })
-
+        
         # Print progress for every 10 ground truth points
         if i % 10 == 0:
             print(f"Processed {i + 1}/{len(ground_truth)} ground truth points...")
-
+    
     return matches
-
 
 def main():
     ground_truth_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09202024 strawberry plot, ndvi chlorophyll(09202024 strawberry ndvi) (1).csv'
