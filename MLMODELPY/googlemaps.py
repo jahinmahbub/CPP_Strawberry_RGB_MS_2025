@@ -131,7 +131,7 @@ if __name__ == "__main__":
 		print("Satellite image successfully fetched.")
 		
 		# Draw rectangle and GT points
-		gt_csv_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09202024 strawberry plot, ndvi chlorophyll(09202024 strawberry ndvi) (1).csv'  # Replace with the path to your GT CSV file
+		gt_csv_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09202024 strawberry plot, ndvi chlorophyll(09202024 strawberry ndvi) (1).csv'
 		modified_image = draw_rectangle_and_points(satellite_image, bounds, rectangle_coords, gt_csv_path)
 		
 		# Save the modified image as GeoTIFF
