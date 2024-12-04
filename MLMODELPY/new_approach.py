@@ -3,7 +3,7 @@ import pandas as pd
 from pyproj import Transformer
 
 # Load GeoTIFF
-geo_tiff_path = "Orthomosaic - Boundary.data.tif"
+geo_tiff_path = '09272024_MS/Orthomosaic - Boundary092724ms.data.tif'
 with rasterio.open(geo_tiff_path) as src:
     crs = src.crs  # Coordinate Reference System
     transform = src.transform  # Affine transform
@@ -11,7 +11,7 @@ with rasterio.open(geo_tiff_path) as src:
     resolution = src.res  # Pixel size (meters/pixel)
 
 # Load GT dataset
-gt_csv_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09202024 strawberry plot, ndvi chlorophyll(09202024 strawberry ndvi) (1).csv'
+gt_csv_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09272024 strawberry plot, ndvi chlorophyll(09272024 strawberry ).csv'
 gt_data = pd.read_csv(gt_csv_path, skiprows=4).dropna(subset=["Longitude", "Latitude"])
 print("GT Data Loaded:", gt_data.head())
 
@@ -53,6 +53,6 @@ print("GT Data with NDVI:", gt_data[["NDVI"]].head())
 print("Number of Bands:", src.count)
 
 
-output_csv_path = "labeled_gt_dataset.csv"
+output_csv_path = 'Training.Data/labeled_gt_dataset.09.27.24.csv'
 gt_data.to_csv(output_csv_path, index=False)
 print(f"Labeled GT dataset saved at: {output_csv_path}")

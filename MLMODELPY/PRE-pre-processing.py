@@ -1,143 +1,136 @@
-import os
-import re
-import subprocess
+import rasterio
 import pandas as pd
-from geopy.distance import geodesic  # Calculate distance between GPS points
+import numpy as np
+import os
+from rasterio.transform import xy
+from pyproj import Transformer
+import matplotlib.pyplot as plt
 
 
-# Convert DMS (degrees, minutes, seconds) to decimal format
-def dms_to_decimal(degrees, minutes, seconds, direction):
-    decimal = float(degrees) + float(minutes) / 60 + float(seconds) / 3600
-    if direction in ['S', 'W']:
-        decimal = -decimal
-    return decimal
+def process_geotiff_and_gt(geotiff_file, gt_csv_file, date):
+    # Load GeoTIFF
+    with rasterio.open(geotiff_file) as dataset:
+        print(f"Processing {date}...")
+        print("GeoTIFF CRS:", dataset.crs)
+        transform = dataset.transform  # Affine transformation for geospatial data
+        bounds = dataset.bounds  # GeoTIFF bounds
+        print("GeoTIFF bounds:", bounds)
 
+        # Load GT CSV
+        gt_data = pd.read_csv(gt_csv_file)
+        gt_data.columns = gt_data.columns.str.strip()  # Strip whitespace
 
-# Extract GPS coordinates from EXIF metadata using exiftool
-def extract_gps_from_exif(filepath):
-    print(f"Extracting GPS data from {filepath}")
-    try:
-        result = subprocess.run(['exiftool', '-GPS*', filepath], capture_output=True, text=True)
+        # Get GeoTIFF CRS dynamically
+        geotiff_crs = dataset.crs.to_string()
+        wgs84_crs = "EPSG:4326"  # CRS for longitude/latitude
 
-        # Parse the output
-        gps_data = result.stdout.strip().split('\n')
-        lat_data = None
-        lat_ref = None
-        lon_data = None
-        lon_ref = None
+        # Create a transformer
+        transformer = Transformer.from_crs(wgs84_crs, geotiff_crs, always_xy=True)
 
-        for line in gps_data:
-            if 'GPS Latitude' in line and 'Ref' not in line:
-                lat_data = line.split(':')[1].strip()
-            elif 'GPS Latitude Ref' in line:
-                lat_ref = line.split(':')[1].strip()
-            elif 'GPS Longitude' in line and 'Ref' not in line:
-                lon_data = line.split(':')[1].strip()
-            elif 'GPS Longitude Ref' in line:
-                lon_ref = line.split(':')[1].strip()
+        # Transform longitude/latitude to UTM
+        gt_data['UTM_X'], gt_data['UTM_Y'] = transformer.transform(gt_data['Longitude'], gt_data['Latitude'])
 
-        if not all([lat_data, lat_ref, lon_data, lon_ref]):
-            print("GPS data is incomplete.")
-            return None
+        # Prepare training data
+        training_data = []
 
-        # Extract degrees, minutes, seconds using regex
-        def parse_dms(dms_str):
-            pattern = r'(\d+) deg (\d+)\' ([\d.]+)"'
-            match = re.match(pattern, dms_str)
-            if match:
-                return [float(x) for x in match.groups()]
-            return None
+        for _, row in gt_data.iterrows():
+            utm_x, utm_y = row['UTM_X'], row['UTM_Y']
 
-        lat_parts = parse_dms(lat_data)
-        lon_parts = parse_dms(lon_data)
-
-        if not lat_parts or not lon_parts:
-            print("GPS DMS parsing failed.")
-            return None
-
-        # Convert to decimal format
-        decimal_lat = dms_to_decimal(*lat_parts, lat_ref)
-        decimal_lon = dms_to_decimal(*lon_parts, lon_ref)
-        print(f"Extracted GPS Coordinates: Latitude {decimal_lat}, Longitude {decimal_lon}")
-
-        return decimal_lon, decimal_lat
-
-    except Exception as e:
-        print(f"Error processing {filepath}: {str(e)}")
-        return None
-
-
-# Recursive function to match ground truth data with the closest image
-def match_ground_truth_recursive(ground_truth_data, images_dir, index=0, matches=[]):
-    if index >= len(ground_truth_data):
-        print("All ground truth entries processed.")
-        return matches
-
-    row = ground_truth_data.iloc[index]
-    gt_lat, gt_lon = row['Latitude'], row['Longitude']
-
-    if pd.isna(gt_lat) or pd.isna(gt_lon):
-        print(f"Skipping invalid ground truth entry at index {index}: ({gt_lat}, {gt_lon})")
-        return match_ground_truth_recursive(ground_truth_data, images_dir, index + 1, matches)
-
-    print(f"Processing ground truth entry at index {index}: ({gt_lat}, {gt_lon})")
-
-    closest_img = None
-    closest_distance = float('inf')
-
-    # Loop through each image to find the closest match
-    for filename in os.listdir(images_dir):
-        if filename.lower().endswith('.tif'):
-            img_path = os.path.join(images_dir, filename)
-            print(f"Checking image: {filename}")
-
-            img_gps = extract_gps_from_exif(img_path)
-
-            if img_gps is None:
-                print(f"No valid GPS data in {filename}. Skipping.")
+            # Ensure UTM coordinates are within the GeoTIFF bounds
+            if not (bounds.left <= utm_x <= bounds.right and bounds.bottom <= utm_y <= bounds.top):
+                print(f"Out of bounds: UTM_X {utm_x}, UTM_Y {utm_y}")
                 continue
 
-            img_lon, img_lat = img_gps  # Switched lon, lat ordering for comparison
+            # Convert UTM to pixel coordinates
+            pixel_row, pixel_col = ~transform * (utm_x, utm_y)
+            pixel_row, pixel_col = int(round(pixel_row)), int(round(pixel_col))
 
-            # Calculate distance if both coordinates are valid
-            try:
-                distance = geodesic((gt_lat, gt_lon), (img_lat, img_lon)).meters  # Distance in meters
-                print(f"Distance from ground truth to {filename}: {distance:.2f} meters")
+            # Ensure pixel coordinates are within the image dimensions
+            if 0 <= pixel_row < dataset.height and 0 <= pixel_col < dataset.width:
+                try:
+                    # Extract RGB values
+                    red = dataset.read(1)[pixel_row, pixel_col]
+                    green = dataset.read(2)[pixel_row, pixel_col]
+                    blue = dataset.read(3)[pixel_row, pixel_col]
 
-                if distance < closest_distance:
-                    closest_distance = distance
-                    closest_img = filename
-                    print(f"New closest image: {closest_img} with distance {closest_distance:.2f} meters")
+                    # Append to training data
+                    training_data.append({
+                        'Date': date,
+                        'Pixel Row': pixel_row,
+                        'Pixel Col': pixel_col,
+                        'Red': red,
+                        'Green': green,
+                        'Blue': blue,
+                        'Chlorophyll': row['Chlorophyll'],
+                        'Plant Health': row['Plant health']
+                    })
+                except IndexError:
+                    print(f"IndexError for pixel coordinates: Row {pixel_row}, Col {pixel_col}")
+            else:
+                print(f"Out of bounds: Pixel Row {pixel_row}, Pixel Col {pixel_col}")
 
-            except ValueError as ve:
-                print(f"Invalid coordinates: Ground Truth ({gt_lat}, {gt_lon}), Image ({img_lat}, {img_lon})")
-                continue
+    return pd.DataFrame(training_data)
 
-    # Save the closest image match for this ground truth point
-    if closest_img:
-        matches.append({
-            "GroundTruth_Lat": gt_lat,
-            "GroundTruth_Lon": gt_lon,
-            "ImageFile": closest_img,
-            "Distance": closest_distance
-        })
-        print(f"Match found for index {index}: {closest_img} with distance {closest_distance:.2f} meters")
 
-    return match_ground_truth_recursive(ground_truth_data, images_dir, index + 1, matches)
+def create_training_dataset(geotiff_dir, gt_csv_dir, dates):
+    combined_data = []
 
-# Load ground truth data
-ground_truth_path = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/09202024 strawberry plot, ndvi chlorophyll(09202024 strawberry ndvi) (1).csv'
-ground_truth_data = pd.read_csv(ground_truth_path, skiprows=4)  # Adjust rows if needed
-ground_truth_data.columns = ['Longitude', 'Latitude', 'No', 'Red', 'NIR', 'NDVI', 'Plant_health', 'Chlorophyll']
+    for date in dates:
+        geotiff_file = os.path.join(geotiff_dir, f"{date}.tif")
+        gt_csv_file = os.path.join(gt_csv_dir, f"{date}.csv")
 
-# Directory with .tif images
-images_dir = 'M:/Workz/CPP Canvas/CS6910RA/CPP_Drone_Strawberry_F23/20240920_Strawberry_Multispectral'
+        print(f"Processing data for {date}...")
+        training_data = process_geotiff_and_gt(geotiff_file, gt_csv_file, date)
+        combined_data.append(training_data)
 
-# Run recursive matching process
-print("Starting recursive ground truth matching...")
-matches = match_ground_truth_recursive(ground_truth_data, images_dir)
+    return pd.concat(combined_data, ignore_index=True)
 
-# Convert matches to DataFrame for analysis
-matches_df = pd.DataFrame(matches)
-print("Final matches DataFrame:")
-print(matches_df)
+
+# Directories for GeoTIFF and GT CSV files
+geotiff_directory = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/MLMODELPY/RGB_GeoTiffs'  # Path to GeoTIFF files
+gt_csv_directory = 'C:/Users/Jahin Catalan Mahbub/My Drive (mzahin.zm@gmail.com)/CPP Canvas/CS6910RA/StrawberryNDVI_ChlorophyllData_Cristobal/'  # Path to GT CSV files
+
+# Dates to process
+dates_to_process = ["09.20.2024", "10.04.2024", "10.11.2024"]
+
+# Create training dataset
+training_dataset = create_training_dataset(geotiff_directory, gt_csv_directory, dates_to_process)
+
+# Data cleaning and preprocessing
+# Remove rows with zero RGB values
+training_dataset = training_dataset[
+    (training_dataset['Red'] != 0) &
+    (training_dataset['Green'] != 0) &
+    (training_dataset['Blue'] != 0)
+]
+
+# Remove rows with missing target labels
+training_dataset = training_dataset.dropna(subset=['Plant Health'])
+
+# Normalize RGB values
+training_dataset[['Red', 'Green', 'Blue']] /= 255.0
+
+# Save the cleaned dataset
+output_path = 'Training.Data/cleaned_training_data.csv'
+os.makedirs(os.path.dirname(output_path), exist_ok=True)  # Ensure directory exists
+training_dataset.to_csv(output_path, index=False)
+print(f"Cleaned training data saved to {output_path}")
+
+# Debugging Statistics
+total_points = len(training_dataset) + training_dataset['Pixel Col'].isna().sum()
+valid_points = len(training_dataset)
+out_of_bounds_points = total_points - valid_points
+print(f"Total points: {total_points}, Valid points: {valid_points}, Out of bounds: {out_of_bounds_points}")
+print(f"Percentage of valid points: {valid_points / total_points * 100:.2f}%")
+
+# Visualization of valid points
+example_geotiff_file = os.path.join(geotiff_directory, "09.20.2024.tif")
+with rasterio.open(example_geotiff_file) as dataset:
+    plt.imshow(dataset.read(1), cmap='gray')  # Display the first band
+    plt.scatter(
+        training_dataset['Pixel Col'], training_dataset['Pixel Row'],
+        c='red', s=1, label='Valid Points'
+    )
+    plt.legend()
+    plt.title("Valid Points on GeoTIFF")
+    plt.show()
