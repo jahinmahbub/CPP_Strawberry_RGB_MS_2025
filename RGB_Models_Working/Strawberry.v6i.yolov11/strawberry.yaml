@@ -1,0 +1,13 @@
+train: C:/Strawberry.v6i.yolov11/train/images
+val: C:/Strawberry.v6i.yolov11/valid/images
+test: C:/Strawberry.v6i.yolov11/test/images
+
+nc: 2
+names: ['Healthy', 'Unhealthy']
+
+roboflow:
+  workspace: strawberry-d07gt
+  project: strawberry-lsy8x
+  version: 6
+  license: MIT
+  url: https://universe.roboflow.com/strawberry-d07gt/strawberry-lsy8x/dataset/6
