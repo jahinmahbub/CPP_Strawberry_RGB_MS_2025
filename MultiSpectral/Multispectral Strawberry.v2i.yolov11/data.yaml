@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['strawberry-plant']
+
+roboflow:
+  workspace: strawberry-d07gt
+  project: multispectral-strawberry
+  version: 1
+  license: MIT
+  url: https://universe.roboflow.com/strawberry-d07gt/multispectral-strawberry/dataset/1
